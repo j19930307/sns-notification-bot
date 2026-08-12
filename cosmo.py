@@ -245,20 +245,216 @@ async def process_cosmo_room_posts(firebase: Firebase, session: aiohttp.ClientSe
         await asyncio.sleep(1.0)
 
 
+def sync_schedules_to_supabase(artist_id: str = "tripleS"):
+    """將 Cosmo 藝人行程 (Artist Schedules) 同步至 Supabase artist_schedules 資料表"""
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_KEY")
+
+    if not supabase_url or not supabase_key:
+        print("⚠️ 未設定 SUPABASE_URL 或 SUPABASE_KEY，跳過行程同步")
+        return
+
+    url_list = f"https://shop.cosmo.fans/bff/v3/artist-schedules?artistId={artist_id}&take=100"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
+
+    user_session = os.environ.get("COSMO_USER_SESSION")
+    if user_session:
+        headers["Cookie"] = f"user-session={user_session}"
+
+    try:
+        resp = requests.get(url_list, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            print(f"⚠️ 取得藝人行程列表失敗 Status {resp.status_code}")
+            return
+        data = resp.json()
+        schedules = data.get("items", [])
+    except Exception as e:
+        print(f"⚠️ 請求藝人行程列表發生例外: {e}")
+        return
+
+    if not schedules:
+        print("ℹ️ 未取得任何藝人行程資料")
+        return
+
+    print(f"📅 成功取得 {len(schedules)} 筆行程，開始補全場館地點與參演成員...")
+
+    batch = []
+    for item in schedules:
+        sid = item.get("id")
+        title = item.get("title", "")
+        content = item.get("content", "")
+        start_at = item.get("startAt")
+        end_at = item.get("endAt")
+        place = item.get("place", "")
+        members = item.get("members", [])
+
+        if sid and (not place or not members):
+            try:
+                detail_url = f"https://shop.cosmo.fans/bff/v3/artist-schedules/{sid}"
+                d_resp = requests.get(detail_url, headers=headers, timeout=5)
+                if d_resp.status_code == 200:
+                    d_data = d_resp.json()
+                    place = d_data.get("place") or place
+                    members = d_data.get("members") or members
+            except Exception:
+                pass
+
+        batch.append({
+            "id": sid,
+            "artist_id": artist_id,
+            "title": title,
+            "content": content,
+            "start_at": start_at,
+            "end_at": end_at,
+            "place": place,
+            "members": members
+        })
+
+    supa_endpoint = f"{supabase_url}/rest/v1/artist_schedules"
+    supa_headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal"
+    }
+
+    try:
+        res_sync = requests.post(supa_endpoint, headers=supa_headers, json=batch, timeout=15)
+        if res_sync.status_code in (200, 201, 204):
+            print(f"⚡ 成功同步 {len(batch)} 筆藝人行程至 Supabase (artist_schedules)")
+        else:
+            print(f"⚠️ 行程同步至 Supabase 失敗 Status {res_sync.status_code}: {res_sync.text}")
+    except Exception as e:
+        print(f"⚠️ 寫入 Supabase 行程資料表時發生例外: {e}")
+
+
+def sync_notices_to_supabase(artist_id: str = "tripleS"):
+    """將 Cosmo 官方公告 (Notices) 全量分頁同步至 Supabase notices 資料表"""
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_KEY")
+
+    if not supabase_url or not supabase_key:
+        print("⚠️ 未設定 SUPABASE_URL 或 SUPABASE_KEY，跳過公告同步")
+        return
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
+
+    user_session = os.environ.get("COSMO_USER_SESSION")
+    if user_session:
+        headers["Cookie"] = f"user-session={user_session}"
+
+    take = 100
+    skip = 0
+    all_raw_notices = []
+
+    print(f"📢 開始透過分頁 (take={take}) 全量抓取 Cosmo 官方公告...")
+
+    while True:
+        url_notices = f"https://shop.cosmo.fans/bff/v3/notices?artistId={artist_id}&take={take}&skip={skip}"
+        try:
+            resp = requests.get(url_notices, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                print(f"⚠️ 取得官方公告失敗 Status {resp.status_code} at skip={skip}")
+                break
+            data = resp.json()
+            items = data.get("result", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            if not items:
+                break
+            all_raw_notices.extend(items)
+            print(f"   已取得 {len(items)} 則公告 (累計: {len(all_raw_notices)} 則)...")
+            if len(items) < take:
+                break
+            skip += take
+        except Exception as e:
+            print(f"⚠️ 請求官方公告發生例外: {e}")
+            break
+
+    if not all_raw_notices:
+        print("ℹ️ 未取得任何官方公告資料")
+        return
+
+    print(f"⚡ 成功取得共 {len(all_raw_notices)} 則官方公告，開始補全內文與圖片細節並同步至 Supabase...")
+
+    batch = []
+    for idx, item in enumerate(all_raw_notices):
+        nid = item.get("id")
+        title = item.get("title", "")
+        category = item.get("category", "")
+        content = item.get("content", "")
+        image_url_list = item.get("imageUrlList") or []
+        active_at = item.get("activeAt") or item.get("createdAt")
+        is_pinned = "[PINNED]" in title or bool(item.get("isPinned"))
+
+        # 呼叫詳情 API 補全完整內文 content 與圖片列表 (imageUrlList)
+        if nid:
+            try:
+                detail_url = f"https://shop.cosmo.fans/bff/v3/notices/{nid}"
+                d_resp = requests.get(detail_url, headers=headers, timeout=5)
+                if d_resp.status_code == 200:
+                    d_res = d_resp.json().get("result", {})
+                    content = d_res.get("content") or content
+                    image_url_list = d_res.get("imageUrlList") or image_url_list
+            except Exception:
+                pass
+
+        batch.append({
+            "id": nid,
+            "artist_id": artist_id,
+            "title": title,
+            "content": content,
+            "image_url_list": image_url_list,
+            "is_pinned": is_pinned,
+            "order_index": idx,
+            "created_at": active_at
+        })
+
+    supa_endpoint = f"{supabase_url}/rest/v1/notices"
+    supa_headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal"
+    }
+
+    try:
+        # 分批寫入 Supabase (每批 100 筆)
+        batch_size = 100
+        for i in range(0, len(batch), batch_size):
+            sub_batch = batch[i:i+batch_size]
+            res_sync = requests.post(supa_endpoint, headers=supa_headers, json=sub_batch, timeout=15)
+            if res_sync.status_code not in (200, 201, 204):
+                print(f"⚠️ 公告批次 {i}~{i+len(sub_batch)} 同步至 Supabase 失敗 Status {res_sync.status_code}: {res_sync.text}")
+
+        print(f"⚡ 成功同步全數 {len(batch)} 則官方公告至 Supabase (notices)")
+    except Exception as e:
+        print(f"⚠️ 寫入 Supabase 公告資料表時發生例外: {e}")
+
+
 async def main():
     load_dotenv()
 
     firebase = Firebase()
 
     start_time = time.perf_counter()
-    print("🚀 [Cosmo Room Posts] 開始執行貼文檢查...")
+    print("🚀 [Cosmo Room Posts & Notices] 開始執行貼文、行程與公告檢查...")
+
+    # 同步藝人行程與官方公告至 Supabase
+    sync_schedules_to_supabase(artist_id="tripleS")
+    sync_notices_to_supabase(artist_id="tripleS")
 
     async with aiohttp.ClientSession() as session:
         await process_cosmo_room_posts(firebase, session)
 
     end_time = time.perf_counter()
-    print(f"✅ [Cosmo Room Posts] 檢查完成，總耗時: {end_time - start_time:.2f} 秒")
+    print(f"✅ [Cosmo Room Posts & Schedules] 檢查完成，總耗時: {end_time - start_time:.2f} 秒")
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+
