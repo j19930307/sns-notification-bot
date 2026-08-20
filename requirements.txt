@@ -7,3 +7,6 @@ google-api-python-client==2.166.0
 aiohttp==3.13.3
 git+https://github.com/j19930307/sns-core.git@89ead0685075ddd61c08a6200bbb73bd9f0ffd7b
 supabase==2.11.0
+
+fake-useragent==1.4.0
+python-dateutil==2.9.0

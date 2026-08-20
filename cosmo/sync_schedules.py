@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 
-from cosmo import sync_schedules_to_supabase
+from cosmo.main import sync_schedules_to_supabase
 
 def main():
     load_dotenv()
