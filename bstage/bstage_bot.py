@@ -1,12 +1,15 @@
+import asyncio
 import json
 import os
 import random
 import re
-import time
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any
 
-from sns_core.clients.discord_messages import post_message, build_embeds
-from sns_core.utils.media import download_video_to_local, cleanup_local_files, download_m3u8_to_mp4
+from sns_core.clients.discord_messages import build_text_embed, post_message
+from sns_core.utils.media import cleanup_local_files, download_m3u8_to_mp4
 
 import requests
 from dateutil import parser
@@ -126,7 +129,9 @@ class BstageBot:
 
         video = post.get("video")
         if isinstance(video, dict):
-            videos.append(video.get("hlsPath"))
+            hls_path = video.get("hlsPath")
+            if isinstance(hls_path, str) and hls_path:
+                videos.append(hls_path)
 
         description = post.get("body") or ""
         author = post["author"]
@@ -144,16 +149,12 @@ class BstageBot:
         post = self._fetch_bstage_post_detail(artist, post_id)
 
         images = list(post.get("images") or [])
-        file_paths = []
+        videos = []
         video = post.get("video")
         if isinstance(video, dict):
             hls_path = video.get("hlsPath")
             if isinstance(hls_path, dict) and hls_path.get("path"):
-                file_path = download_video_to_local(
-                    video_url=f"https://media.static.bstage.in/{artist}{hls_path['path']}",
-                    filename=f"{time.time()}.mp4"
-                )
-                file_paths.append(file_path)
+                videos.append(f"https://media.static.bstage.in/{artist}{hls_path['path']}")
 
         author = post["author"]
         return SocialPost(
@@ -161,16 +162,93 @@ class BstageBot:
             author=PostAuthor(author["nickname"], author["avatarImgPath"]),
             text=post.get("body") or "",
             images=images,
-            file_paths=file_paths,
+            videos=videos,
             created_at=convert_to_datetime(post["publishedAt"]),
         )
+
+    def _download_image(self, media_url: str, destination_dir: str, index: int) -> str | None:
+        filename = Path(urlparse(media_url).path).name or f"image_{index}.jpg"
+        output_path = os.path.join(destination_dir, f"image_{index}_{filename}")
+        downloaded_size = 0
+        oversized = False
+
+        response = requests.get(media_url, headers=headers, stream=True, timeout=30)
+        response.raise_for_status()
+        with open(output_path, "wb") as file:
+            for chunk in response.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                downloaded_size += len(chunk)
+                if downloaded_size > 25 * 1024 * 1024:
+                    oversized = True
+                    break
+                file.write(chunk)
+
+        if oversized:
+            os.remove(output_path)
+            print(f"媒體超過 Discord 25MB 限制，改傳連結: {media_url}")
+            return None
+        return output_path
+
+    def _download_video(self, media_url: str, destination_dir: str, index: int) -> str | None:
+        output_path = os.path.join(destination_dir, f"video_{index}.mp4")
+        file_path = download_m3u8_to_mp4(media_url, output_path)
+        if file_path is None or not os.path.exists(file_path):
+            return None
+        if os.path.getsize(file_path) > 25 * 1024 * 1024:
+            cleanup_local_files([file_path])
+            print(f"媒體超過 Discord 25MB 限制，改傳連結: {media_url}")
+            return None
+        return file_path
+
+    def _send_social_post_with_all_media(self, channel_id: str, social_post: SocialPost) -> None:
+        """Send the post card followed by every downloadable image and video attachment."""
+        post_message(channel_id=channel_id, embeds=build_text_embed(social_post))
+
+        media_dir = tempfile.mkdtemp(prefix="sns-media-")
+        downloaded_files: list[str] = []
+        media_links: list[str] = []
+        try:
+            for index, image_url in enumerate(social_post.images or [], start=1):
+                try:
+                    file_path = self._download_image(image_url, media_dir, index)
+                    if file_path:
+                        downloaded_files.append(file_path)
+                    else:
+                        media_links.append(image_url)
+                except requests.RequestException as error:
+                    print(f"圖片下載失敗，改傳連結 {image_url}: {error}")
+                    media_links.append(image_url)
+
+            for index, video_url in enumerate(social_post.videos or [], start=1):
+                try:
+                    file_path = self._download_video(video_url, media_dir, index)
+                    if file_path:
+                        downloaded_files.append(file_path)
+                    else:
+                        media_links.append(video_url)
+                except Exception as error:
+                    print(f"影片下載失敗，改傳連結 {video_url}: {error}")
+                    media_links.append(video_url)
+
+            for start in range(0, len(downloaded_files), 10):
+                post_message(channel_id=channel_id, file_paths=downloaded_files[start:start + 10])
+
+            if media_links:
+                post_message(channel_id=channel_id, content="\n".join(media_links))
+        finally:
+            cleanup_local_files(downloaded_files)
+            try:
+                os.rmdir(media_dir)
+            except OSError:
+                pass
 
     async def execute(self):
         bstage_subscribed_list = await self.__firestore.get_subscribed_list(SocialPlatform.BSTAGE)
         for doc in bstage_subscribed_list:
             # 每隔 3 ~ 5 秒執行
             random_sleep_time = random.uniform(3, 5)
-            time.sleep(random_sleep_time)
+            await asyncio.sleep(random_sleep_time)
             artist = doc.id
             discord_channel_id = doc.get("discord_channel_id")
             # 取得上次最新發文時間
@@ -198,13 +276,7 @@ class BstageBot:
                 print(f"有 {post_count} 則發文")
                 for social_post in reversed(social_posts):
                     print(social_post)
-                    post_message(
-                        channel_id=discord_channel_id,
-                        content=social_post.post_link,
-                        embeds=build_embeds(social_post),
-                        file_paths=social_post.file_paths
-                    )
-                    cleanup_local_files(social_post.file_paths)
+                    self._send_social_post_with_all_media(discord_channel_id, social_post)
                 # 儲存最新發文時間
                 updated_at = max([social_post.created_at for social_post in social_posts])
                 print(f"更新最後發文時間: {updated_at}")
@@ -217,7 +289,7 @@ class BstageBot:
         for doc in mnet_plus_subscribed_list:
             # 每隔 3 ~ 5 秒執行
             random_sleep_time = random.uniform(3, 5)
-            time.sleep(random_sleep_time)
+            await asyncio.sleep(random_sleep_time)
             artist = doc.id
             discord_channel_id = doc.get("discord_channel_id")
             # 取得上次最新發文時間
@@ -245,30 +317,7 @@ class BstageBot:
                 print(f"有 {post_count} 則發文")
                 for social_post in reversed(social_posts):
                     print(social_post)
-                    post_message(
-                        channel_id=discord_channel_id,
-                        content=social_post.post_link,
-                        embeds=build_embeds(social_post)
-                    )
-
-                    videos = social_post.videos
-                    if videos is not None and len(videos) > 0:
-                        file_paths = []
-                        for video in videos:
-                            file_path = download_m3u8_to_mp4(video, f"{time.time()}.mp4")
-                            file_paths.append(file_path)
-
-                        # 直接傳入檔案路徑列表
-                        post_message(
-                            channel_id=discord_channel_id,
-                            content="",
-                            file_paths=file_paths  # 直接傳入路徑列表
-                        )
-
-                        # 清理暫存檔案
-                        for file_path in file_paths:
-                            if os.path.exists(file_path):
-                                os.remove(file_path)
+                    self._send_social_post_with_all_media(discord_channel_id, social_post)
                 # 儲存最新發文時間
                 updated_at = max([social_post.created_at for social_post in social_posts])
                 print(f"更新最後發文時間: {updated_at}")
@@ -276,10 +325,3 @@ class BstageBot:
             else:
                 print("無新發文")
             print("抓取結束")
-
-
-if __name__ == '__main__':
-    file_paths = []
-    file_path = download_m3u8_to_mp4(
-        "https://media.static.bstage.in/limelight/media/68c166446b9b4960d49eac08/hls/ori.m3u8", f"{time.time()}.mp4")
-    file_paths.append(file_path)
