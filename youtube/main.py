@@ -10,9 +10,9 @@ if sys.platform == 'win32':
 import aiohttp
 from dotenv import load_dotenv
 
-from youtube_crawler import YouTubeCrawler
-from discord_bot import DiscordBot
-from firebase import Firebase
+from youtube.youtube_crawler import YouTubeCrawler
+from youtube.discord_bot import DiscordBot
+from shared.firebase import Firebase
 
 MAX_CONCURRENT_CHANNEL = 3
 MAX_CONCURRENT_API = 10

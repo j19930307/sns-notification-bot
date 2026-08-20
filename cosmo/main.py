@@ -18,7 +18,7 @@ from sns_core import build_embeds, build_text_embed
 from sns_core.models import SocialPost, PostAuthor
 from sns_core.clients.discord_messages import post_message
 
-from firebase import Firebase
+from shared.firebase import Firebase
 
 # 註冊 Cosmo Room 來源圖示與名稱
 dm._SOURCE_MAP["shop.cosmo.fans"] = ("Cosmo Room", "https://static.cosmo.fans/assets/triples-logo.png")

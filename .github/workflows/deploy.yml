@@ -46,13 +46,13 @@ jobs:
             --project=${{ env.GCP_PROJECT_ID }} \
             --recurse
 
-      # 安裝 python3-venv 與 git 套件
-      - name: Install venv and git packages
+      # 安裝 Python 虛擬環境、Git 與 ffmpeg
+      - name: Install runtime packages
         run: |
           gcloud compute ssh ${{ env.GCE_USERNAME }}@${{ env.GCE_INSTANCE_NAME }} \
             --zone=${{ env.GCE_INSTANCE_ZONE }} \
             --project=${{ env.GCP_PROJECT_ID }} \
-            --command="sudo apt-get update && sudo apt-get install -y python3-venv git"
+            --command="sudo apt-get update && sudo apt-get install -y python3-venv git ffmpeg"
 
       # 設定 Python 虛擬環境和依賴
       - name: Set up Python virtual environment and dependencies
@@ -67,10 +67,10 @@ jobs:
             --project=${{ env.GCP_PROJECT_ID }} \
             --command="cd ~/my-app && ./venv/bin/pip install --upgrade pip setuptools wheel && ./venv/bin/pip install --no-cache-dir -r requirements.txt"
 
-      # 設定 Crontab 任務 (YouTube 每 3 分鐘，Cosmo Room 每 5 分鐘)
+      # 設定 Crontab 任務（YouTube 每 3 分鐘、Cosmo 每 5 分鐘、b.stage、Berriz 各每 5 分鐘（錯開 2 分鐘））
       - name: Set up cron job to run with virtual environment
         run: |
           gcloud compute ssh ${{ env.GCE_USERNAME }}@${{ env.GCE_INSTANCE_NAME }} \
             --zone=${{ env.GCE_INSTANCE_ZONE }} \
             --project=${{ env.GCP_PROJECT_ID }} \
-            --command="(echo '1-59/3 * * * * cd ~/my-app && timeout 170 ./venv/bin/python main.py >> ~/cron.log 2>&1'; echo '*/5 * * * * cd ~/my-app && timeout 280 ./venv/bin/python cosmo.py >> ~/cron_cosmo.log 2>&1') | crontab -"
+            --command="(echo '1-59/3 * * * * cd ~/my-app && timeout 170 ./venv/bin/python -m youtube.main >> ~/cron.log 2>&1'; echo '*/5 * * * * cd ~/my-app && timeout 280 ./venv/bin/python -m cosmo.main >> ~/cron_cosmo.log 2>&1'; echo '*/5 * * * * cd ~/my-app && timeout 270 ./venv/bin/python -m bstage.main >> ~/cron_bstage.log 2>&1'; echo '2-59/5 * * * * cd ~/my-app && timeout 270 ./venv/bin/python -m berriz.main >> ~/cron_berriz.log 2>&1') | crontab -"
