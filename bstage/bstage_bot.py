@@ -204,10 +204,18 @@ class BstageBot:
     def _send_social_post_with_all_media(self, channel_id: str, social_post: SocialPost) -> None:
         """Send the post card followed by every downloadable image and video attachment."""
         if len(social_post.images or []) <= 4 and not social_post.videos:
-            post_message(channel_id=channel_id, embeds=build_embeds(social_post))
+            post_message(
+                channel_id=channel_id,
+                content=social_post.post_link,
+                embeds=build_embeds(social_post),
+            )
             return
 
-        post_message(channel_id=channel_id, embeds=build_text_embed(social_post))
+        post_message(
+            channel_id=channel_id,
+            content=social_post.post_link,
+            embeds=build_text_embed(social_post),
+        )
 
         media_dir = tempfile.mkdtemp(prefix="sns-media-")
         downloaded_files: list[str] = []
