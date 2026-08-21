@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any
 
-from sns_core.clients.discord_messages import build_text_embed, post_message
+from sns_core.clients.discord_messages import build_embeds, build_text_embed, post_message
 from sns_core.utils.media import cleanup_local_files, download_m3u8_to_mp4
 
 import requests
@@ -203,6 +203,10 @@ class BstageBot:
 
     def _send_social_post_with_all_media(self, channel_id: str, social_post: SocialPost) -> None:
         """Send the post card followed by every downloadable image and video attachment."""
+        if len(social_post.images or []) <= 4 and not social_post.videos:
+            post_message(channel_id=channel_id, embeds=build_embeds(social_post))
+            return
+
         post_message(channel_id=channel_id, embeds=build_text_embed(social_post))
 
         media_dir = tempfile.mkdtemp(prefix="sns-media-")
