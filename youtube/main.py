@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from itertools import islice
 
 if sys.platform == 'win32':
@@ -17,6 +18,7 @@ from shared.firebase import Firebase
 MAX_CONCURRENT_CHANNEL = 3
 MAX_CONCURRENT_API = 10
 YOUTUBE_BATCH_SIZE = 50
+STREAM_DELETION_GRACE_PERIOD_HOURS = 6
 
 channel_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHANNEL)
 api_semaphore = asyncio.Semaphore(MAX_CONCURRENT_API)
@@ -116,8 +118,9 @@ async def process_channel(channel, youtube_crawler, firebase, discord_bot):
 
         filtered_short_info = [
             info for info in updated_shorts_info
-            if latest_short_published_at is None
-               or info.get("published_at") > latest_short_published_at
+            if (latest_short_published_at is None
+               or info.get("published_at") > latest_short_published_at)
+               and info.get("id") != latest_short.get("id")
         ]
 
         if filtered_short_info:
@@ -158,8 +161,9 @@ async def process_channel(channel, youtube_crawler, firebase, discord_bot):
 
         filtered_video_info = [
             info for info in updated_videos_info
-            if latest_video_published_at is None
-               or info.get("published_at") > latest_video_published_at
+            if (latest_video_published_at is None
+               or info.get("published_at") > latest_video_published_at)
+               and info.get("id") != latest_video.get("id")
         ]
 
         if filtered_video_info:
@@ -200,36 +204,61 @@ async def process_channel(channel, youtube_crawler, firebase, discord_bot):
 
         filtered_stream_info = [
             info for info in updated_streams_info
-            if latest_stream_published_at is None
-               or info.get("published_at") > latest_stream_published_at
+            if (latest_stream_published_at is None
+               or info.get("published_at") > latest_stream_published_at)
+               and info.get("id") != latest_stream.get("id")
         ]
 
         if filtered_stream_info:
-            videos_url = [f"https://www.youtube.com/live/{info.get('id')}" for info in filtered_stream_info]
-            videos_joined = "\n".join(videos_url)
-            content = f'{channel_name}直播中\n{videos_joined}'
-            response = discord_bot.send_message(discord_channel_id=channel.get("discord_channel_id"),
-                                                content=content)
-            if response.status_code == 200:
-                print(f"{channel_name} 直播發送到 Discord 頻道成功")
+            live_streams = [
+                info for info in filtered_stream_info
+                if info.get("snippet", {}).get("liveBroadcastContent") == "live"
+            ]
+
+            if live_streams:
+                videos_url = [f"https://www.youtube.com/live/{info.get('id')}" for info in live_streams]
+                videos_joined = "\n".join(videos_url)
+                content = f'{channel_name}直播中\n{videos_joined}'
+                response = discord_bot.send_message(discord_channel_id=channel.get("discord_channel_id"),
+                                                    content=content)
+                if response.status_code == 200:
+                    print(f"{channel_name} 直播發送到 Discord 頻道成功")
+                    firebase.set_latest_stream_info(channel_handle=channel.id, stream_id=filtered_stream_info[0].get("id"),
+                                                    published_at=filtered_stream_info[0].get("published_at"))
+                else:
+                    print(f"{channel_name} 直播發送到 Discord 頻道失敗")
+            else:
+                print(f"{channel_name} 偵測到新直播紀錄，但已非直播中狀態（可能為存檔重上架），不發送推播")
                 firebase.set_latest_stream_info(channel_handle=channel.id, stream_id=filtered_stream_info[0].get("id"),
                                                 published_at=filtered_stream_info[0].get("published_at"))
-            else:
-                print(f"{channel_name} 直播發送到 Discord 頻道失敗")
         else:
             print(f"{channel_name} 沒有新直播")
             if not stream_id_found and updated_streams_info and latest_stream.get("id"):
-                exists = await youtube_crawler.get_videos_info([latest_stream.get("id")])
-                if exists is not None and not exists:
-                    newest_stream = updated_streams_info[0]
-                    firebase.set_latest_stream_info(
-                        channel_handle=channel.id,
-                        stream_id=newest_stream.get("id"),
-                        published_at=newest_stream.get("published_at")
+                is_within_grace_period = False
+                if latest_stream_published_at:
+                    stream_time = (
+                        latest_stream_published_at
+                        if latest_stream_published_at.tzinfo
+                        else latest_stream_published_at.replace(tzinfo=timezone.utc)
                     )
-                    print(f"{channel_name} 偵測到已儲存的直播 ID 被刪除，更新最新直播為: {newest_stream.get('id')}")
+                    time_since_published = (datetime.now(timezone.utc) - stream_time).total_seconds()
+                    if time_since_published < STREAM_DELETION_GRACE_PERIOD_HOURS * 3600:
+                        is_within_grace_period = True
+
+                if is_within_grace_period:
+                    print(f"{channel_name} 已儲存的直播在轉檔保護期（{STREAM_DELETION_GRACE_PERIOD_HOURS}小時）內，暫不判定為刪除")
                 else:
-                    print(f"{channel_name} 已儲存的直播 ID {latest_stream.get('id')} 未在列表中，但 API 確認其依然存在，不更新最新直播")
+                    exists = await youtube_crawler.get_videos_info([latest_stream.get("id")])
+                    if exists is not None and not exists:
+                        newest_stream = updated_streams_info[0]
+                        firebase.set_latest_stream_info(
+                            channel_handle=channel.id,
+                            stream_id=newest_stream.get("id"),
+                            published_at=newest_stream.get("published_at")
+                        )
+                        print(f"{channel_name} 偵測到已儲存的直播 ID 被刪除，更新最新直播為: {newest_stream.get('id')}")
+                    else:
+                        print(f"{channel_name} 已儲存的直播 ID {latest_stream.get('id')} 未在列表中，但 API 確認其依然存在，不更新最新直播")
 
 
 async def main():
